@@ -238,12 +238,20 @@ func TestStoppedPluginRejectsEvaluation(t *testing.T) {
 
 	body := `{"subject": {"type": "user", "id": "bob"}, "action": {"name": "read"}, "resource": {"type": "doc", "id": "1"}}`
 	req := httptest.NewRequest(http.MethodPost, "/access/v1/evaluation", bytes.NewBufferString(body))
+	req.Header.Set("X-Request-ID", "stopped-req-456")
 	w := httptest.NewRecorder()
 
 	p.handleEvaluation(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	// X-Request-ID must be echoed even on 503 (AuthZEN Section 10.1.3).
+	if got := w.Header().Get("X-Request-ID"); got != "stopped-req-456" {
+		t.Fatalf("expected X-Request-ID=stopped-req-456, got %q", got)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type=application/json, got %q", ct)
 	}
 }
 
@@ -259,6 +267,9 @@ func TestStoppedPluginRejectsWellKnown(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type=application/json, got %q", ct)
 	}
 }
 
@@ -283,6 +294,61 @@ func TestWellKnownXForwardedHost(t *testing.T) {
 
 	if metadata["policy_decision_point"] != "http://pdp.example.com" {
 		t.Fatalf("unexpected pdp: %s", metadata["policy_decision_point"])
+	}
+}
+
+func TestWellKnownXForwardedProto(t *testing.T) {
+	p := testPlugin(t, `package authzen`)
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/authzen-configuration", nil)
+	req.Host = "pdp.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+
+	p.handleWellKnown(w, req)
+
+	var metadata map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+
+	if metadata["policy_decision_point"] != "https://pdp.example.com" {
+		t.Fatalf("unexpected pdp: %s", metadata["policy_decision_point"])
+	}
+}
+
+func TestWellKnownEmptyHostFallback(t *testing.T) {
+	p := testPlugin(t, `package authzen`)
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/authzen-configuration", nil)
+	req.Host = ""
+	w := httptest.NewRecorder()
+
+	p.handleWellKnown(w, req)
+
+	var metadata map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+
+	if metadata["policy_decision_point"] != "http://localhost" {
+		t.Fatalf("unexpected pdp: %s", metadata["policy_decision_point"])
+	}
+}
+
+func TestErrorResponseContentType(t *testing.T) {
+	p := testPlugin(t, `package authzen`)
+
+	req := httptest.NewRequest(http.MethodPost, "/access/v1/evaluation", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	p.handleEvaluation(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type=application/json, got %q", ct)
 	}
 }
 

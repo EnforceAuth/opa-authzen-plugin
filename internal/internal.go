@@ -103,23 +103,30 @@ type evaluationResponse struct {
 	Context  json.RawMessage `json:"context,omitempty"`
 }
 
-func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request) {
-	p.mu.RLock()
-	stopped := p.stopped
-	p.mu.RUnlock()
-	if stopped {
-		http.Error(w, `{"error":"plugin is shutting down"}`, http.StatusServiceUnavailable)
-		return
-	}
+func jsonError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	fmt.Fprintf(w, `{"error":%q}`, msg)
+}
 
-	// Echo X-Request-ID if present (Section 10.1.3).
+func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request) {
+	// Echo X-Request-ID if present (Section 10.1.3). Must be set before
+	// any early return so it appears even on error responses.
 	if reqID := r.Header.Get("X-Request-ID"); reqID != "" {
 		w.Header().Set("X-Request-ID", reqID)
 	}
 
+	p.mu.RLock()
+	stopped := p.stopped
+	p.mu.RUnlock()
+	if stopped {
+		jsonError(w, "plugin is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+
 	var req evaluationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
@@ -128,7 +135,7 @@ func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request)
 	if req.Subject != nil {
 		var v any
 		if err := json.Unmarshal(req.Subject, &v); err != nil {
-			http.Error(w, `{"error":"invalid subject"}`, http.StatusBadRequest)
+			jsonError(w, "invalid subject", http.StatusBadRequest)
 			return
 		}
 		input["subject"] = v
@@ -136,7 +143,7 @@ func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request)
 	if req.Resource != nil {
 		var v any
 		if err := json.Unmarshal(req.Resource, &v); err != nil {
-			http.Error(w, `{"error":"invalid resource"}`, http.StatusBadRequest)
+			jsonError(w, "invalid resource", http.StatusBadRequest)
 			return
 		}
 		input["resource"] = v
@@ -144,7 +151,7 @@ func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request)
 	if req.Action != nil {
 		var v any
 		if err := json.Unmarshal(req.Action, &v); err != nil {
-			http.Error(w, `{"error":"invalid action"}`, http.StatusBadRequest)
+			jsonError(w, "invalid action", http.StatusBadRequest)
 			return
 		}
 		input["action"] = v
@@ -152,7 +159,7 @@ func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request)
 	if req.Context != nil {
 		var v any
 		if err := json.Unmarshal(req.Context, &v); err != nil {
-			http.Error(w, `{"error":"invalid context"}`, http.StatusBadRequest)
+			jsonError(w, "invalid context", http.StatusBadRequest)
 			return
 		}
 		input["context"] = v
@@ -161,7 +168,7 @@ func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request)
 	decision, err := p.eval(r.Context(), input)
 	if err != nil {
 		p.logger.Error("Evaluation error: %v", err)
-		http.Error(w, `{"error":"evaluation failed"}`, http.StatusInternalServerError)
+		jsonError(w, "evaluation failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -229,7 +236,7 @@ func (p *AuthZenPlugin) handleWellKnown(w http.ResponseWriter, r *http.Request) 
 	stopped := p.stopped
 	p.mu.RUnlock()
 	if stopped {
-		http.Error(w, `{"error":"plugin is shutting down"}`, http.StatusServiceUnavailable)
+		jsonError(w, "plugin is shutting down", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -237,9 +244,15 @@ func (p *AuthZenPlugin) handleWellKnown(w http.ResponseWriter, r *http.Request) 
 	if r.TLS != nil {
 		scheme = "https"
 	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
 	host := r.Host
 	if host == "" {
 		host = r.Header.Get("X-Forwarded-Host")
+	}
+	if host == "" {
+		host = "localhost"
 	}
 	base := fmt.Sprintf("%s://%s", scheme, host)
 	metadata := map[string]string{
