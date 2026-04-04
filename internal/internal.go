@@ -47,6 +47,7 @@ type AuthZenPlugin struct {
 	manager *plugins.Manager
 	cfg     Config
 	mu      sync.RWMutex
+	started bool
 	stopped bool
 	logger  logging.Logger
 }
@@ -62,10 +63,17 @@ func New(m *plugins.Manager, cfg *Config) *AuthZenPlugin {
 
 // Start registers the AuthZEN routes on OPA's HTTP server via ExtraRoute.
 func (p *AuthZenPlugin) Start(_ context.Context) error {
-	p.logger.Info("Starting AuthZEN plugin")
+	p.mu.Lock()
+	alreadyStarted := p.started
+	p.started = true
+	p.stopped = false
+	p.mu.Unlock()
 
-	p.manager.ExtraRoute("POST /access/v1/evaluation", "authzen/evaluation", p.handleEvaluation)
-	p.manager.ExtraRoute("GET /.well-known/authzen-configuration", "authzen/well-known", p.handleWellKnown)
+	if !alreadyStarted {
+		p.logger.Info("Starting AuthZEN plugin")
+		p.manager.ExtraRoute("POST /access/v1/evaluation", "authzen/evaluation", p.handleEvaluation)
+		p.manager.ExtraRoute("GET /.well-known/authzen-configuration", "authzen/well-known", p.handleWellKnown)
+	}
 
 	p.manager.UpdatePluginStatus(PluginName, &plugins.Status{State: plugins.StateOK})
 
@@ -86,7 +94,6 @@ func (p *AuthZenPlugin) Reconfigure(_ context.Context, config any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cfg = *config.(*Config)
-	p.stopped = false
 }
 
 // AuthZEN Access Evaluation API request.
@@ -106,7 +113,7 @@ type evaluationResponse struct {
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	fmt.Fprintf(w, `{"error":%q}`, msg)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func (p *AuthZenPlugin) handleEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -244,7 +251,7 @@ func (p *AuthZenPlugin) handleWellKnown(w http.ResponseWriter, r *http.Request) 
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "http" || proto == "https" {
 		scheme = proto
 	}
 	host := r.Host

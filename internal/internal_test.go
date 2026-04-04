@@ -317,6 +317,26 @@ func TestWellKnownXForwardedProto(t *testing.T) {
 	}
 }
 
+func TestWellKnownXForwardedProtoInvalid(t *testing.T) {
+	p := testPlugin(t, `package authzen`)
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/authzen-configuration", nil)
+	req.Host = "pdp.example.com"
+	req.Header.Set("X-Forwarded-Proto", "javascript")
+	w := httptest.NewRecorder()
+
+	p.handleWellKnown(w, req)
+
+	var metadata map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+
+	if metadata["policy_decision_point"] != "http://pdp.example.com" {
+		t.Fatalf("expected invalid proto to be ignored, got pdp: %s", metadata["policy_decision_point"])
+	}
+}
+
 func TestWellKnownEmptyHostFallback(t *testing.T) {
 	p := testPlugin(t, `package authzen`)
 
@@ -368,5 +388,50 @@ func TestStartRegistersExtraRoutes(t *testing.T) {
 	}
 	if ps.State != plugins.StateOK {
 		t.Fatalf("expected StateOK, got %v", ps.State)
+	}
+}
+
+func TestDoubleStartDoesNotPanic(t *testing.T) {
+	p := testPlugin(t, `package authzen
+		default allow = false
+	`)
+
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+	// Second Start must not panic from duplicate ExtraRoute registration.
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+}
+
+func TestStartAfterStopResetsState(t *testing.T) {
+	p := testPlugin(t, `package authzen
+		default allow = false
+	`)
+
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.Stop(context.Background())
+
+	// After Stop, requests should be rejected.
+	body := `{"subject": {"type": "user", "id": "bob"}, "action": {"name": "read"}, "resource": {"type": "doc", "id": "1"}}`
+	req := httptest.NewRequest(http.MethodPost, "/access/v1/evaluation", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	p.handleEvaluation(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 after Stop, got %d", w.Code)
+	}
+
+	// After Start again, requests should be accepted.
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/access/v1/evaluation", bytes.NewBufferString(body))
+	w = httptest.NewRecorder()
+	p.handleEvaluation(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after restart, got %d", w.Code)
 	}
 }
